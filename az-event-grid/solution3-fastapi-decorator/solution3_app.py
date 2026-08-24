@@ -15,7 +15,7 @@ Usage:
 import os
 import logging
 from typing import Optional
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, Header
 from pydantic import BaseModel
 from solution3_ip_monitor_decorator import (
     monitor_ip_status,
@@ -37,6 +37,19 @@ SUBSCRIPTION_ID = os.getenv("SUBSCRIPTION_ID", "")
 RESOURCE_GROUP = os.getenv("RESOURCE_GROUP", "")
 VNET_NAME = os.getenv("VNET_NAME", "")
 SUBNET_NAME = os.getenv("SUBNET_NAME", "")
+API_KEY = os.getenv("API_KEY", "")
+
+
+async def verify_api_key(x_api_key: str = Header(None)):
+    """Verify API key for protected endpoints."""
+    if not API_KEY:
+        # If no API_KEY configured, log warning but don't block (for development)
+        logger.warning("API_KEY not configured - running without authentication")
+        return True
+
+    if x_api_key != API_KEY:
+        raise HTTPException(status_code=403, detail="Invalid or missing API key")
+    return True
 
 
 class CreateNICRequest(BaseModel):
@@ -65,18 +78,20 @@ async def health_check():
     return {"status": "healthy"}
 
 
-@app.get("/subnet-status", response_model=SubnetStatusResponse)
+@app.get("/subnet-status", response_model=SubnetStatusResponse, dependencies=[Depends(verify_api_key)])
 async def get_status():
     """
     Get current subnet IP status.
 
     Returns subnet IP metrics without creating any resources.
     Useful for pre-flight checks and monitoring.
+
+    Requires: X-API-Key header
     """
     if not all([SUBSCRIPTION_ID, RESOURCE_GROUP, VNET_NAME, SUBNET_NAME]):
         raise HTTPException(
-            status_code=400,
-            detail="Missing configuration: SUBSCRIPTION_ID, RESOURCE_GROUP, VNET_NAME, SUBNET_NAME"
+            status_code=500,
+            detail="Service misconfiguration"
         )
 
     ip_status = get_subnet_ip_status(
@@ -89,7 +104,7 @@ async def get_status():
     if ip_status is None:
         raise HTTPException(
             status_code=500,
-            detail="Failed to query subnet IP status"
+            detail="Failed to query subnet status"
         )
 
     return SubnetStatusResponse(
@@ -113,7 +128,6 @@ def create_nic_impl(nic_name: str) -> dict:
     # 2. Assign an IP from the subnet
     # 3. Configure network settings
     return {
-        "id": f"/subscriptions/{SUBSCRIPTION_ID}/resourceGroups/{RESOURCE_GROUP}/providers/Microsoft.Network/networkInterfaces/{nic_name}",
         "name": nic_name,
         "status": "created"
     }
@@ -140,7 +154,7 @@ except ValueError as e:
     raise
 
 
-@app.post("/create-nic", response_model=CreateNICResponse)
+@app.post("/create-nic", response_model=CreateNICResponse, dependencies=[Depends(verify_api_key)])
 async def create_nic(request: CreateNICRequest):
     """
     Create a NIC with IP availability check.
@@ -155,14 +169,16 @@ async def create_nic(request: CreateNICRequest):
         Success response with NIC details
 
     Raises:
-        HTTPException 400: Missing configuration
+        HTTPException 400: Invalid request
         HTTPException 409: Insufficient free IPs
-        HTTPException 500: Azure API error
+        HTTPException 500: Service error
+
+    Requires: X-API-Key header
     """
     if not all([SUBSCRIPTION_ID, RESOURCE_GROUP, VNET_NAME, SUBNET_NAME]):
         raise HTTPException(
-            status_code=400,
-            detail="Missing Azure configuration. Set: SUBSCRIPTION_ID, RESOURCE_GROUP, VNET_NAME, SUBNET_NAME"
+            status_code=500,
+            detail="Service misconfiguration"
         )
 
     try:
@@ -172,21 +188,21 @@ async def create_nic(request: CreateNICRequest):
         return CreateNICResponse(
             status="success",
             nic_name=request.nic_name,
-            message=f"NIC created successfully: {result['id']}"
+            message=f"NIC created successfully"
         )
 
     except IPAvailabilityError as e:
-        logger.warning(f"NIC creation blocked: {e}")
+        logger.warning(f"NIC creation blocked: insufficient IPs")
         raise HTTPException(
             status_code=409,
-            detail=f"Insufficient IPs in subnet: {str(e)}"
+            detail="Cannot create NIC: insufficient IP addresses available"
         )
 
     except Exception as e:
         logger.error(f"Error creating NIC: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to create NIC: {str(e)}"
+            detail="Failed to create NIC"
         )
 
 
