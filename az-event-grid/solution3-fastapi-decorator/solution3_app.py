@@ -14,6 +14,7 @@ Usage:
 
 import os
 import logging
+import hmac
 from typing import Optional
 from fastapi import FastAPI, HTTPException, Depends, Header
 from pydantic import BaseModel
@@ -41,13 +42,19 @@ API_KEY = os.getenv("API_KEY", "")
 
 
 async def verify_api_key(x_api_key: str = Header(None)):
-    """Verify API key for protected endpoints."""
-    if not API_KEY:
-        # If no API_KEY configured, log warning but don't block (for development)
-        logger.warning("API_KEY not configured - running without authentication")
-        return True
+    """Verify API key for protected endpoints.
 
-    if x_api_key != API_KEY:
+    Fails closed: rejects all requests if API_KEY not configured.
+    Uses constant-time comparison to prevent timing attacks.
+    """
+    if not API_KEY:
+        logger.error("API_KEY not configured - rejecting all requests (fail-closed)")
+        raise HTTPException(
+            status_code=403,
+            detail="API authentication is required but not configured"
+        )
+
+    if not x_api_key or not hmac.compare_digest(x_api_key, API_KEY):
         raise HTTPException(status_code=403, detail="Invalid or missing API key")
     return True
 
